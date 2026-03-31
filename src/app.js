@@ -1,4 +1,8 @@
 import { uuid, clamp, todayStr, escHtml, diamond, filterNotes, sortNotes, ROAST_LABELS } from './utils.js';
+import { initAuth, signIn, signOut, isLoggedIn, setAuthChangeCallback, getAccessToken } from './google-auth.js';
+import { fetchAllNotes, appendNote, updateNote as sheetUpdateNote, deleteNote as sheetDeleteNote, bulkImportNotes } from './google-sheets.js';
+import { uploadPhotos, getPhotoBase64, deletePhotos } from './google-drive.js';
+import { analyzePhoto, hasApiKey, getApiKey, setApiKey } from './gemini.js';
 
 // ── Constants ────────────────────────────────────────────────
 const STORAGE_KEY = 'tastingnote:notes';
@@ -12,27 +16,124 @@ const PRESET_TAGS  = [
 
 // ── State ────────────────────────────────────────────────────
 let notes = [];
-let masterTags   = [...PRESET_TAGS]; // all known tags
-let selectedTags = [];               // tags for current form
+let masterTags   = [...PRESET_TAGS];
+let selectedTags = [];
 let currentRating = 0;
 let currentPhotos = []; // array of base64 strings
 let pendingDeleteId = null;
-let editingId = null;    // id of note being edited, or null
+let editingId = null;
+let isSyncing = false;
 
-// ── Storage ──────────────────────────────────────────────────
-function loadNotes() {
+// ── Storage (localStorage fallback) ──────────────────────────
+function loadNotesLocal() {
   try {
-    notes = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
   } catch {
-    notes = [];
+    return [];
   }
 }
 
-function saveNotes() {
+function saveNotesLocal() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
   } catch (e) {
     showToast('保存に失敗しました（容量不足の可能性があります）');
+  }
+}
+
+// ── Load / Save (routes to Google or localStorage) ───────────
+async function loadNotes() {
+  if (isLoggedIn()) {
+    try {
+      setSyncStatus(true);
+      const cloudNotes = await fetchAllNotes();
+      // Convert photoIds to photos (load from Drive)
+      for (const note of cloudNotes) {
+        if (note.photoIds?.length > 0 && !note.photos) {
+          note.photos = [];
+          for (const fid of note.photoIds) {
+            const base64 = await getPhotoBase64(fid);
+            if (base64) note.photos.push(base64);
+          }
+        }
+      }
+      notes = cloudNotes;
+      setSyncStatus(false);
+    } catch (e) {
+      console.error('Failed to load from Sheets:', e);
+      showToast('クラウドからの読み込みに失敗しました');
+      notes = loadNotesLocal();
+      setSyncStatus(false);
+    }
+  } else {
+    notes = loadNotesLocal();
+  }
+}
+
+async function saveNote(noteData, isEdit) {
+  if (isLoggedIn()) {
+    try {
+      setSyncStatus(true);
+      // Upload photos to Drive
+      let photoIds = noteData.photoIds || [];
+      if (noteData.photos?.length > 0) {
+        // Find new photos (base64 that need uploading)
+        const newPhotos = noteData.photos.filter(p => p.startsWith('data:'));
+        if (newPhotos.length > 0) {
+          const newIds = await uploadPhotos(newPhotos, noteData.id);
+          photoIds = [...photoIds, ...newIds];
+        }
+      }
+      const sheetNote = { ...noteData, photoIds };
+      delete sheetNote.photos; // Don't store base64 in sheet
+
+      if (isEdit) {
+        await sheetUpdateNote(sheetNote);
+      } else {
+        await appendNote(sheetNote);
+      }
+      setSyncStatus(false);
+    } catch (e) {
+      console.error('Failed to save to Sheets:', e);
+      showToast('クラウドへの保存に失敗しました');
+      setSyncStatus(false);
+    }
+  } else {
+    saveNotesLocal();
+  }
+}
+
+async function removeNote(id) {
+  // Find note to get photoIds for cleanup
+  const note = notes.find(n => n.id === id);
+  notes = notes.filter(n => n.id !== id);
+
+  if (isLoggedIn()) {
+    try {
+      setSyncStatus(true);
+      if (note?.photoIds?.length > 0) {
+        await deletePhotos(note.photoIds);
+      }
+      await sheetDeleteNote(id);
+      setSyncStatus(false);
+    } catch (e) {
+      console.error('Failed to delete from Sheets:', e);
+      showToast('クラウドからの削除に失敗しました');
+      setSyncStatus(false);
+    }
+  } else {
+    saveNotesLocal();
+  }
+}
+
+// ── Sync status indicator ────────────────────────────────────
+function setSyncStatus(syncing) {
+  isSyncing = syncing;
+  const btn = document.getElementById('auth-btn');
+  if (syncing) {
+    btn.classList.add('syncing');
+  } else {
+    btn.classList.remove('syncing');
   }
 }
 
@@ -52,6 +153,77 @@ function addToMaster(tag) {
   if (!masterTags.includes(tag)) {
     masterTags.push(tag);
     saveMasterTags();
+  }
+}
+
+// ── Auth UI ──────────────────────────────────────────────────
+function updateAuthUI() {
+  const btn = document.getElementById('auth-btn');
+  const label = document.getElementById('auth-label');
+  if (isLoggedIn()) {
+    label.textContent = 'ログアウト';
+    btn.classList.add('logged-in');
+  } else {
+    label.textContent = 'ログイン';
+    btn.classList.remove('logged-in');
+  }
+}
+
+async function onAuthChanged(loggedIn) {
+  updateAuthUI();
+  if (loggedIn) {
+    // Check if there's local data to migrate
+    const localNotes = loadNotesLocal();
+    if (localNotes.length > 0) {
+      document.getElementById('migrate-dialog').showModal();
+    } else {
+      await loadNotes();
+      renderList();
+      updateCount();
+    }
+  } else {
+    // Switch back to localStorage
+    notes = loadNotesLocal();
+    renderList();
+    updateCount();
+  }
+}
+
+// ── Migration ────────────────────────────────────────────────
+async function migrateToCloud() {
+  const localNotes = loadNotesLocal();
+  if (localNotes.length === 0) return;
+
+  try {
+    setSyncStatus(true);
+    showToast('移行中...');
+
+    // Upload photos and convert to photoIds
+    const migratedNotes = [];
+    for (const note of localNotes) {
+      const photos = note.photos || (note.photo ? [note.photo] : []);
+      let photoIds = [];
+      if (photos.length > 0) {
+        photoIds = await uploadPhotos(photos, note.id);
+      }
+      const { photo, photos: _, ...rest } = note;
+      migratedNotes.push({ ...rest, photoIds });
+    }
+
+    await bulkImportNotes(migratedNotes);
+
+    // Clear localStorage notes after successful migration
+    localStorage.removeItem(STORAGE_KEY);
+
+    showToast(`${localNotes.length}件の記録を移行しました`);
+    await loadNotes();
+    renderList();
+    updateCount();
+    setSyncStatus(false);
+  } catch (e) {
+    console.error('Migration failed:', e);
+    showToast('移行に失敗しました');
+    setSyncStatus(false);
   }
 }
 
@@ -109,7 +281,6 @@ function renderSuggestions(query) {
     box.appendChild(item);
   });
 
-  // "新しく追加" option when query doesn't exactly match any master tag
   const exactExists = masterTags.some(t => t.toLowerCase() === q);
   if (q && !exactExists) {
     const item = document.createElement('div');
@@ -139,7 +310,6 @@ function buildRadar(svgEl, { bitterness, acidity, sweetness, body }, size = 220)
   svgEl.setAttribute('height', size);
   svgEl.innerHTML = '';
 
-  // Grid polygons (5 levels)
   for (let i = 1; i <= 5; i++) {
     const t = i / 5;
     const poly = document.createElementNS(ns, 'polygon');
@@ -150,7 +320,6 @@ function buildRadar(svgEl, { bitterness, acidity, sweetness, body }, size = 220)
     svgEl.appendChild(poly);
   }
 
-  // Axis lines
   [[cx, cy - r], [cx + r, cy], [cx, cy + r], [cx - r, cy]].forEach(([x, y]) => {
     const line = document.createElementNS(ns, 'line');
     line.setAttribute('x1', cx); line.setAttribute('y1', cy);
@@ -160,7 +329,6 @@ function buildRadar(svgEl, { bitterness, acidity, sweetness, body }, size = 220)
     svgEl.appendChild(line);
   });
 
-  // Data polygon
   const b  = clamp(bitterness, 1, 5) / 5;
   const a  = clamp(acidity,    1, 5) / 5;
   const s  = clamp(sweetness,  1, 5) / 5;
@@ -179,7 +347,6 @@ function buildRadar(svgEl, { bitterness, acidity, sweetness, body }, size = 220)
   dataPoly.setAttribute('stroke-linejoin', 'round');
   svgEl.appendChild(dataPoly);
 
-  // Labels
   const pad = size * 0.088;
   [
     { text: '苦味', x: cx,       y: cy - r - pad * 0.6, anchor: 'middle' },
@@ -199,8 +366,6 @@ function buildRadar(svgEl, { bitterness, acidity, sweetness, body }, size = 220)
     svgEl.appendChild(t);
   });
 }
-
-
 
 // ── Photo helpers ─────────────────────────────────────────────
 function compressImage(file, maxPx, quality = 0.75) {
@@ -246,6 +411,65 @@ function renderPhotoThumbnails() {
     wrap.append(img, btn);
     container.appendChild(wrap);
   });
+}
+
+// ── AI auto-fill ─────────────────────────────────────────────
+async function handleAiAnalyze() {
+  if (!hasApiKey()) {
+    // Show API key dialog
+    const dialog = document.getElementById('apikey-dialog');
+    document.getElementById('apikey-input').value = getApiKey();
+    dialog.showModal();
+    return;
+  }
+
+  if (currentPhotos.length === 0) {
+    showToast('先に写真を追加してください');
+    return;
+  }
+
+  const btn = document.getElementById('ai-analyze-btn');
+  const label = document.getElementById('ai-btn-label');
+  btn.disabled = true;
+  label.textContent = '分析中...';
+  btn.classList.add('analyzing');
+
+  try {
+    // Use the first photo for analysis
+    const result = await analyzePhoto(currentPhotos[0]);
+
+    // Fill form fields with AI results
+    if (result.beanName) document.getElementById('bean-name').value = result.beanName;
+    if (result.origin) document.getElementById('origin').value = result.origin;
+    if (result.producer) document.getElementById('producer').value = result.producer;
+    if (result.process) document.getElementById('process').value = result.process;
+    if (result.roaster) document.getElementById('roaster').value = result.roaster;
+    if (result.roastLevel) {
+      const rl = Number(result.roastLevel);
+      if (rl >= 1 && rl <= 5) {
+        document.getElementById('roast-level').value = rl;
+        document.getElementById('roast-label').textContent = ROAST_LABELS[rl];
+      }
+    }
+    if (result.tags?.length > 0) {
+      result.tags.forEach(tag => {
+        if (!selectedTags.includes(tag)) {
+          selectedTags.push(tag);
+          addToMaster(tag);
+        }
+      });
+      renderSelectedTags();
+    }
+
+    showToast('AIで自動入力しました');
+  } catch (e) {
+    console.error('AI analysis failed:', e);
+    showToast(e.message || 'AI分析に失敗しました');
+  } finally {
+    btn.disabled = false;
+    label.textContent = 'AIで自動入力';
+    btn.classList.remove('analyzing');
+  }
 }
 
 // ── Star rating ───────────────────────────────────────────────
@@ -315,12 +539,10 @@ function buildCard(note) {
     ? note.drinkDate.replace(/-/g, '/')
     : new Date(note.createdAt).toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '/');
 
-  // Stars string
   const stars = note.rating
     ? '★'.repeat(note.rating) + '☆'.repeat(5 - note.rating)
     : '';
 
-  // Tag HTML helpers
   function tag(iconSvg, text) {
     return `<span class="tag">${iconSvg}${escHtml(text)}</span>`;
   }
@@ -338,7 +560,7 @@ function buildCard(note) {
     note.brewMethod ? tag(cupIcon,     note.brewMethod)                : '',
   ].filter(Boolean).join('');
 
-  // support old single photo
+  // Support: base64 photos (local), or loaded from Drive
   const photos = note.photos || (note.photo ? [note.photo] : []);
   const photoHtml = photos.length === 0 ? '' :
     `<div class="card-photos${photos.length === 1 ? ' single' : ''}">${
@@ -425,7 +647,6 @@ function loadNoteIntoForm(note) {
   selectedTags = [...(note.tags || [])];
   renderSelectedTags();
 
-  // support both old single photo and new array
   currentPhotos = note.photos
     ? [...note.photos]
     : note.photo ? [note.photo] : [];
@@ -470,12 +691,40 @@ function switchTab(name) {
 }
 
 // ── Init ──────────────────────────────────────────────────────
-function init() {
-  loadNotes();
+async function init() {
   loadMasterTags();
-  updateCount();
   refreshFormRadar();
   document.getElementById('drink-date').value = todayStr();
+
+  // Init Google Auth
+  setAuthChangeCallback(onAuthChanged);
+  await initAuth();
+  updateAuthUI();
+
+  // Auth button
+  document.getElementById('auth-btn').addEventListener('click', () => {
+    if (isLoggedIn()) {
+      signOut();
+    } else {
+      signIn();
+    }
+  });
+
+  // Migration dialog
+  document.getElementById('migrate-ok').addEventListener('click', async () => {
+    document.getElementById('migrate-dialog').close();
+    await migrateToCloud();
+  });
+  document.getElementById('migrate-skip').addEventListener('click', async () => {
+    document.getElementById('migrate-dialog').close();
+    await loadNotes();
+    renderList();
+    updateCount();
+  });
+
+  // Load notes (localStorage on first load, until user logs in)
+  await loadNotes();
+  updateCount();
 
   // Tag picker
   document.getElementById('tag-add-btn').addEventListener('click', () => {
@@ -526,6 +775,22 @@ function init() {
     photoInput.value = '';
   });
 
+  // AI analyze button
+  document.getElementById('ai-analyze-btn').addEventListener('click', handleAiAnalyze);
+
+  // API key dialog
+  document.getElementById('apikey-save').addEventListener('click', () => {
+    const key = document.getElementById('apikey-input').value.trim();
+    if (key) {
+      setApiKey(key);
+      document.getElementById('apikey-dialog').close();
+      showToast('APIキーを保存しました');
+    }
+  });
+  document.getElementById('apikey-cancel').addEventListener('click', () => {
+    document.getElementById('apikey-dialog').close();
+  });
+
   // Roast level slider
   document.getElementById('roast-level').addEventListener('input', e => {
     document.getElementById('roast-label').textContent = ROAST_LABELS[e.target.value];
@@ -556,7 +821,7 @@ function init() {
   document.getElementById('sort-select').addEventListener('change', renderList);
 
   // Form submit
-  document.getElementById('record-form').addEventListener('submit', e => {
+  document.getElementById('record-form').addEventListener('submit', async e => {
     e.preventDefault();
     const beanName = document.getElementById('bean-name').value.trim();
     if (!beanName) return;
@@ -582,14 +847,19 @@ function init() {
 
     if (editingId) {
       const idx = notes.findIndex(n => n.id === editingId);
-      if (idx !== -1) notes[idx] = { ...notes[idx], ...fields };
+      if (idx !== -1) {
+        notes[idx] = { ...notes[idx], ...fields };
+        await saveNote(notes[idx], true);
+      }
       showToast('更新しました');
     } else {
-      notes.unshift({ id: uuid(), createdAt: Date.now(), ...fields });
+      const newNote = { id: uuid(), createdAt: Date.now(), ...fields };
+      notes.unshift(newNote);
+      await saveNote(newNote, false);
       showToast('記録しました');
     }
 
-    saveNotes();
+    if (!isLoggedIn()) saveNotesLocal();
     updateCount();
     resetForm();
     switchTab('list');
@@ -601,10 +871,9 @@ function init() {
     dialog.close();
     pendingDeleteId = null;
   });
-  document.getElementById('confirm-ok').addEventListener('click', () => {
+  document.getElementById('confirm-ok').addEventListener('click', async () => {
     if (pendingDeleteId) {
-      notes = notes.filter(n => n.id !== pendingDeleteId);
-      saveNotes();
+      await removeNote(pendingDeleteId);
       renderList();
       showToast('削除しました');
     }

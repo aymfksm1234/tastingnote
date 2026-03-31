@@ -572,3 +572,101 @@ dialog p { font-size: 0.95rem; margin-bottom: 20px; color: var(--text); }
   white-space: nowrap;
 }
 .toast.show { transform: translateX(-50%) translateY(0); }
+
+/* ── Auth button ────────────────────────────────────────── */
+.header-auth { margin-left: auto; }
+.auth-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.25);
+  color: #fff;
+  border-radius: 20px;
+  padding: 5px 12px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.2s;
+}
+.auth-btn:hover { background: rgba(255,255,255,0.25); }
+.auth-btn.logged-in {
+  background: rgba(200,151,58,0.3);
+  border-color: var(--accent);
+}
+.auth-btn.syncing {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.auth-btn.syncing::after {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  margin-left: 4px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Migrate dialog accent button ───────────────────────── */
+.dialog-actions button.accent {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ── Photo actions row ──────────────────────────────────── */
+.photo-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ── AI analyze button ──────────────────────────────────── */
+.ai-analyze-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  background: rgba(200,151,58,0.08);
+  color: var(--accent-dark);
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.2s, transform 0.1s;
+  white-space: nowrap;
+}
+.ai-analyze-btn:hover {
+  background: rgba(200,151,58,0.18);
+}
+.ai-analyze-btn:active {
+  transform: scale(0.97);
+}
+.ai-analyze-btn:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.ai-analyze-btn.analyzing {
+  opacity: 0.7;
+}
+.ai-analyze-btn.analyzing svg {
+  animation: spin 1s linear infinite;
+}
+
+/* ── API key dialog ─────────────────────────────────────── */
+.dialog-hint {
+  font-size: 0.8rem;
+  color: var(--text-light);
+  margin-bottom: 12px;
+}
+#apikey-dialog input[type="text"] {
+  margin-bottom: 16px;
+  font-size: 0.85rem;
+  font-family: monospace;
+}
