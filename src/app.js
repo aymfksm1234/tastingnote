@@ -552,7 +552,10 @@ function buildCard(note) {
   const dropletIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>`;
   const homeIcon    = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
 
+  const shopIcon    = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2L3 7v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-3-5z"/><line x1="3" y1="7" x2="21" y2="7"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>`;
+
   const tags = [
+    note.roaster    ? tag(shopIcon,    note.roaster)                   : '',
     note.origin     ? tag(pinIcon,     note.origin)                    : '',
     note.producer   ? tag(homeIcon,    note.producer)                  : '',
     note.process    ? tag(dropletIcon, note.process)                   : '',
@@ -588,7 +591,7 @@ function buildCard(note) {
         </button>
       </div>
     </div>
-    <div class="card-date">${dateStr}</div>
+    <div class="card-date">${dateStr} ${note.photoIds ? '<span class="storage-icon cloud" title="クラウド保存"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></span>' : '<span class="storage-icon local" title="ローカル保存"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></span>'}</div>
     ${tags ? `<div class="card-tags">${tags}</div>` : ''}
     <div class="card-radar">
       <svg viewBox="0 0 160 160" width="160" height="160"></svg>
