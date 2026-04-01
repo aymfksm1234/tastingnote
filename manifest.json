@@ -1,0 +1,22 @@
+{
+  "name": "Tasting Notes",
+  "short_name": "TastingNotes",
+  "description": "コーヒーテイスティングノート",
+  "start_url": "/tastingnote/",
+  "scope": "/tastingnote/",
+  "display": "standalone",
+  "background_color": "#f5f0e8",
+  "theme_color": "#3d2314",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

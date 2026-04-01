@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <title>Tasting Notes</title>
   <link rel="stylesheet" href="src/style.css">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#3d2314">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
@@ -46,6 +50,22 @@
         <line x1="9" y1="9" x2="9" y2="21"/>
       </svg>
       一覧 <span id="list-count" class="count"></span>
+    </button>
+    <button class="tab" data-tab="stats">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="20" x2="18" y2="10"/>
+        <line x1="12" y1="20" x2="12" y2="4"/>
+        <line x1="6" y1="20" x2="6" y2="14"/>
+      </svg>
+      統計
+    </button>
+    <button class="tab" data-tab="map">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="2" y1="12" x2="22" y2="12"/>
+        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+      </svg>
+      マップ
     </button>
   </nav>
 
@@ -286,6 +306,21 @@
       <div id="notes-list"></div>
       <p id="empty-msg" class="empty-msg" hidden>まだ記録がありません</p>
     </section>
+
+    <!-- Stats Tab -->
+    <section id="tab-stats" class="tab-content">
+      <div id="stats-content">
+        <p class="empty-msg">記録が増えると統計が表示されます</p>
+      </div>
+    </section>
+
+    <!-- Map Tab -->
+    <section id="tab-map" class="tab-content">
+      <div id="map-content">
+        <svg id="world-map" viewBox="0 0 800 450" class="world-map"></svg>
+        <div id="map-legend" class="map-legend"></div>
+      </div>
+    </section>
   </main>
 
   <!-- Gemini API key dialog -->
@@ -318,5 +353,10 @@
   </dialog>
 
   <script type="module" src="src/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+  </script>
 </body>
 </html>

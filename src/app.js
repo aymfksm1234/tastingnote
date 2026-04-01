@@ -3,6 +3,8 @@ import { initAuth, signIn, signOut, isLoggedIn, setAuthChangeCallback, getAccess
 import { fetchAllNotes, appendNote, updateNote as sheetUpdateNote, deleteNote as sheetDeleteNote, bulkImportNotes } from './google-sheets.js';
 import { uploadPhotos, getPhotoBase64, deletePhotos } from './google-drive.js';
 import { analyzePhoto, hasApiKey, getApiKey, setApiKey } from './gemini.js';
+import { renderStats } from './stats.js';
+import { renderMap } from './map.js';
 
 // ── Constants ────────────────────────────────────────────────
 const STORAGE_KEY = 'tastingnote:notes';
@@ -599,9 +601,32 @@ function buildCard(note) {
     ${stars ? `<div class="card-stars">${stars}</div>` : ''}
     ${(note.tags || []).length ? `<div class="card-flavor-tags">${(note.tags).map(t => `<span class="card-flavor-chip">${escHtml(t)}</span>`).join('')}</div>` : ''}
     ${note.memo ? `<p class="card-memo">${escHtml(note.memo)}</p>` : ''}
+    <div class="card-actions">
+      <button class="share-btn" aria-label="シェア">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+          <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+        </svg>
+        シェア
+      </button>
+      <button class="recommend-btn" aria-label="おすすめ">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+          <path d="M12 2a4 4 0 0 1 4 4c0 1.95-2 3-2 8h-4c0-5-2-6.05-2-8a4 4 0 0 1 4-4z"/>
+          <line x1="10" y1="17" x2="14" y2="17"/>
+          <line x1="10" y1="20" x2="14" y2="20"/>
+        </svg>
+        似たコーヒー
+      </button>
+    </div>
   `;
 
   buildRadar(card.querySelector('.card-radar svg'), note, 160);
+
+  // Share button - generate image
+  card.querySelector('.share-btn').addEventListener('click', () => shareCard(card, note));
+
+  // Recommend button
+  card.querySelector('.recommend-btn').addEventListener('click', () => recommendSimilar(note));
 
   card.querySelector('.edit-btn').addEventListener('click', () => {
     loadNoteIntoForm(note);
@@ -620,6 +645,166 @@ function buildCard(note) {
 function updateCount() {
   const el = document.getElementById('list-count');
   el.textContent = notes.length > 0 ? notes.length : '';
+}
+
+// ── Share card as image ──────────────────────────────────────
+async function shareCard(cardEl, note) {
+  try {
+    // Clone card, hide action buttons
+    const clone = cardEl.cloneNode(true);
+    clone.querySelectorAll('.card-actions, .edit-btn, .delete-btn').forEach(el => el.remove());
+    clone.style.width = '360px';
+    clone.style.padding = '20px';
+    clone.style.position = 'fixed';
+    clone.style.left = '-9999px';
+    clone.style.background = '#ece7dd';
+    clone.style.borderRadius = '14px';
+
+    // Add branding
+    const brand = document.createElement('div');
+    brand.style.cssText = 'text-align:center;font-size:11px;color:#7a6048;margin-top:12px;padding-top:8px;border-top:1px solid #d4c5a9';
+    brand.textContent = 'Tasting Notes';
+    clone.appendChild(brand);
+
+    document.body.appendChild(clone);
+
+    // Use canvas to capture
+    const canvas = document.createElement('canvas');
+    const scale = 2;
+    canvas.width = clone.offsetWidth * scale;
+    canvas.height = clone.offsetHeight * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+
+    // Draw background
+    ctx.fillStyle = '#ece7dd';
+    ctx.beginPath();
+    ctx.roundRect(0, 0, clone.offsetWidth, clone.offsetHeight, 14);
+    ctx.fill();
+
+    // Convert to image via SVG foreignObject
+    const svgData = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${clone.offsetWidth}" height="${clone.offsetHeight}">
+        <foreignObject width="100%" height="100%">
+          <div xmlns="http://www.w3.org/1999/xhtml">${clone.outerHTML}</div>
+        </foreignObject>
+      </svg>`;
+
+    document.body.removeChild(clone);
+
+    const img = new Image();
+    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = url;
+    });
+
+    ctx.drawImage(img, 0, 0, clone.offsetWidth, clone.offsetHeight);
+    URL.revokeObjectURL(url);
+
+    canvas.toBlob(async blob => {
+      if (navigator.share && navigator.canShare?.({ files: [new File([blob], 'note.png')] })) {
+        await navigator.share({
+          title: note.beanName,
+          files: [new File([blob], `${note.beanName}.png`, { type: 'image/png' })],
+        });
+      } else {
+        // Fallback: download
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${note.beanName}.png`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast('画像をダウンロードしました');
+      }
+    }, 'image/png');
+  } catch (e) {
+    console.error('Share failed:', e);
+    showToast('シェアに失敗しました');
+  }
+}
+
+// ── Similar coffee recommendation ────────────────────────────
+async function recommendSimilar(note) {
+  if (!hasApiKey()) {
+    const dialog = document.getElementById('apikey-dialog');
+    document.getElementById('apikey-input').value = getApiKey();
+    dialog.showModal();
+    return;
+  }
+
+  showToast('おすすめを考え中...');
+
+  try {
+    const prompt = `以下のコーヒーの情報をもとに、似たテイストや特徴を持つおすすめのコーヒー豆を3つ提案してください。
+
+豆: ${note.beanName}
+産地: ${note.origin || '不明'}
+精製: ${note.process || '不明'}
+焙煎: ${ROAST_LABELS[note.roastLevel] || '不明'}
+フレーバー: ${(note.tags || []).join(', ') || '不明'}
+苦味: ${note.bitterness}/5, 酸味: ${note.acidity}/5, 甘味: ${note.sweetness}/5, コク: ${note.body}/5
+
+以下のJSON形式で回答してください:
+[
+  {"name": "豆の名前", "origin": "産地", "reason": "おすすめの理由（1文）"}
+]
+JSONのみを返してください。`;
+
+    const apiKey = getApiKey();
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 512 },
+        }),
+      }
+    );
+
+    if (!res.ok) throw new Error('API error');
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error('Parse error');
+
+    const recommendations = JSON.parse(jsonMatch[0]);
+    showRecommendDialog(note.beanName, recommendations);
+  } catch (e) {
+    console.error('Recommend failed:', e);
+    showToast('おすすめの取得に失敗しました');
+  }
+}
+
+function showRecommendDialog(beanName, recs) {
+  let dialog = document.getElementById('recommend-dialog');
+  if (!dialog) {
+    dialog = document.createElement('dialog');
+    dialog.id = 'recommend-dialog';
+    document.body.appendChild(dialog);
+    dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
+  }
+  dialog.innerHTML = `
+    <p><strong>${escHtml(beanName)}</strong> が好きなあなたに</p>
+    <div class="recommend-list">
+      ${recs.map(r => `
+        <div class="recommend-item">
+          <div class="recommend-name">${escHtml(r.name)}</div>
+          <div class="recommend-origin">${escHtml(r.origin)}</div>
+          <div class="recommend-reason">${escHtml(r.reason)}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="dialog-actions">
+      <button onclick="this.closest('dialog').close()" class="accent">閉じる</button>
+    </div>
+  `;
+  dialog.showModal();
 }
 
 // ── Load note into form (edit mode) ──────────────────────────
@@ -691,6 +876,8 @@ function switchTab(name) {
     sec.classList.toggle('active', sec.id === `tab-${name}`);
   });
   if (name === 'list') renderList();
+  if (name === 'stats') renderStats(notes, document.getElementById('stats-content'));
+  if (name === 'map') renderMap(notes, document.getElementById('world-map'), document.getElementById('map-legend'));
 }
 
 // ── Init ──────────────────────────────────────────────────────
