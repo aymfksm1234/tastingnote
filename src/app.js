@@ -776,7 +776,45 @@ async function init() {
   });
 
   // AI analyze button
-  document.getElementById('ai-analyze-btn').addEventListener('click', handleAiAnalyze);
+  // AI analyze: click to analyze, long-press to change API key
+  const aiBtn = document.getElementById('ai-analyze-btn');
+  let aiLongPress = null;
+  aiBtn.addEventListener('mousedown', () => {
+    aiLongPress = setTimeout(() => {
+      aiLongPress = 'fired';
+      const dialog = document.getElementById('apikey-dialog');
+      document.getElementById('apikey-input').value = getApiKey();
+      dialog.showModal();
+    }, 700);
+  });
+  aiBtn.addEventListener('mouseup', () => {
+    if (aiLongPress !== 'fired') {
+      clearTimeout(aiLongPress);
+      handleAiAnalyze();
+    }
+    aiLongPress = null;
+  });
+  aiBtn.addEventListener('mouseleave', () => {
+    if (aiLongPress !== 'fired') clearTimeout(aiLongPress);
+    aiLongPress = null;
+  });
+  // Touch support
+  aiBtn.addEventListener('touchstart', (e) => {
+    aiLongPress = setTimeout(() => {
+      aiLongPress = 'fired';
+      const dialog = document.getElementById('apikey-dialog');
+      document.getElementById('apikey-input').value = getApiKey();
+      dialog.showModal();
+    }, 700);
+  }, { passive: true });
+  aiBtn.addEventListener('touchend', (e) => {
+    if (aiLongPress !== 'fired') {
+      clearTimeout(aiLongPress);
+      handleAiAnalyze();
+    }
+    aiLongPress = null;
+    e.preventDefault();
+  });
 
   // API key dialog
   document.getElementById('apikey-save').addEventListener('click', () => {
