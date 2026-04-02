@@ -1,5 +1,5 @@
 // ── Google Sheets API Module ─────────────────────────────────
-import { getAccessToken } from './google-auth.js';
+import { getAccessToken, clearSavedToken } from './google-auth.js';
 
 const SPREADSHEET_NAME = 'TastingNotes';
 const SHEET_NAME = 'Notes';
@@ -30,6 +30,7 @@ async function sheetsApi(path, options = {}) {
     },
   });
   if (!res.ok) {
+    if (res.status === 401) clearSavedToken();
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error?.message || `Sheets API error: ${res.status}`);
   }
